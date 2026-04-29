@@ -1,0 +1,23 @@
+# Test/scratch files
+tests/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Output files
+output files/
+
+# Secrets / API keys
+.env
+*.json
+
+# Claude
+whiteboard.md
+CLAUDE.md
+.claude/
+
+# OS
+.DS_Store
