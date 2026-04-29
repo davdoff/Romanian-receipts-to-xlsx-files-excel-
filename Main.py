@@ -23,6 +23,9 @@ import argparse
 from pathlib import Path
 import openpyxl
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+from dotenv import load_dotenv
+
+load_dotenv()
 
 SUPPORTED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".gif"}
 
@@ -133,6 +136,35 @@ def clean_bleedthrough(img_bgr):
     return cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel)
 
 
+def ocr_with_vision(image_path: Path) -> str:
+    from google.cloud import vision
+    api_key = os.environ.get("GOOGLE_VISION_API_KEY")
+    client_options = {"api_key": api_key} if api_key else {}
+    vision_client = vision.ImageAnnotatorClient(client_options=client_options)
+    with open(image_path, "rb") as f:
+        content = f.read()
+    image = vision.Image(content=content)
+    response = vision_client.document_text_detection(image=image)
+    if response.error.message:
+        raise RuntimeError(f"Google Vision error: {response.error.message}")
+    return response.full_text_annotation.text
+
+
+def ocr_pil_with_vision(pil_img) -> str:
+    import io
+    from google.cloud import vision
+    api_key = os.environ.get("GOOGLE_VISION_API_KEY")
+    client_options = {"api_key": api_key} if api_key else {}
+    vision_client = vision.ImageAnnotatorClient(client_options=client_options)
+    buf = io.BytesIO()
+    pil_img.save(buf, format="JPEG")
+    image = vision.Image(content=buf.getvalue())
+    response = vision_client.document_text_detection(image=image)
+    if response.error.message:
+        raise RuntimeError(f"Google Vision error: {response.error.message}")
+    return response.full_text_annotation.text
+
+
 def encode_image(image_path: Path) -> tuple[str, str]:
     import cv2
     img = cv2.imread(str(image_path))
@@ -157,26 +189,15 @@ def encode_pil_image(pil_img) -> tuple[str, str]:
     return base64.standard_b64encode(buf.tobytes()).decode("utf-8"), "image/jpeg"
 
 
-def _call_api(client: anthropic.Anthropic, b64_data: str, media_type: str) -> dict:
+def _call_api(client: anthropic.Anthropic, ocr_text: str) -> dict:
     response = client.messages.create(
         model="claude-haiku-4-5-20251001",
-        #model="claude-sonnet-4-6",
         max_tokens=4096,
         system=SYSTEM_PROMPT,
         messages=[
             {
                 "role": "user",
-                "content": [
-                    {
-                        "type": "image",
-                        "source": {
-                            "type": "base64",
-                            "media_type": media_type,
-                            "data": b64_data,
-                        },
-                    },
-                    {"type": "text", "text": "Extract all data from this Romanian fiscal receipt."},
-                ],
+                "content": f"Extract all data from this Romanian fiscal receipt:\n\n{ocr_text}",
             },
         ],
     )
@@ -189,13 +210,13 @@ def _call_api(client: anthropic.Anthropic, b64_data: str, media_type: str) -> di
 
 
 def extract_receipt(client: anthropic.Anthropic, image_path: Path) -> dict:
-    b64_data, media_type = encode_image(image_path)
-    return _call_api(client, b64_data, media_type)
+    ocr_text = ocr_with_vision(image_path)
+    return _call_api(client, ocr_text)
 
 
 def extract_receipt_from_pil(client: anthropic.Anthropic, pil_img) -> dict:
-    b64_data, media_type = encode_pil_image(pil_img)
-    return _call_api(client, b64_data, media_type)
+    ocr_text = ocr_pil_with_vision(pil_img)
+    return _call_api(client, ocr_text)
 
 
 def style_header(cell, header_fill, header_font, center, border):
@@ -396,6 +417,8 @@ def main():
     api_key = os.environ.get("ANTHROPIC_API_KEY")
     if not api_key:
         raise EnvironmentError("Set ANTHROPIC_API_KEY environment variable first.")
+    if not os.environ.get("GOOGLE_VISION_API_KEY"):
+        raise EnvironmentError("Set GOOGLE_VISION_API_KEY environment variable first.")
 
     client = anthropic.Anthropic(api_key=api_key)
 

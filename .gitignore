@@ -7,8 +7,9 @@ __pycache__/
 .venv/
 venv/
 
-# Output files
-output files/
+# Output files (keep folder, ignore contents)
+output files/*
+!output files/.gitkeep
 
 # Secrets / API keys
 .env
