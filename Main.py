@@ -46,7 +46,7 @@ SUPPORTED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".gif"}
 # Maps the actual VAT rate (%) to the canonical output category letter.
 RATE_TO_CATEGORY = {21: "A", 11: "B", 5: "C"}
 
-SYSTEM_PROMPT = """You extract data from Romanian fiscal receipts (bonuri fiscale).
+RECEIPT_SYSTEM_PROMPT = """You extract data from Romanian fiscal receipts (bonuri fiscale).
 Output ONLY a valid JSON object matching this exact schema — no markdown, no text outside the JSON.
 
 SCHEMA:
@@ -79,6 +79,30 @@ RULES:
 - receipt_number: found at the bottom of the receipt, may appear as "BF", "Nr. bon", "Numar bon", or "Numar bon fiscal"
 - If a field is not visible or not applicable, use null
 - Ignore the items, the important infromation is before the items start with and after the total"""
+
+FACTURA_SYSTEM_PROMPT = """You extract data from Romanian fiscal invoices (facturi).
+Output ONLY a valid JSON object matching this exact schema — no markdown, no text outside the JSON.
+
+SCHEMA:
+{
+  "invoice_number": "string or null",
+  "date": "YYYY-MM-DD or null",
+  "vendor": {"name": "string or null"},
+  "client": {"name": "string or null"},
+  "contract_number": "string or null",
+  "livrare": "string or null",
+  "total_plata": number or null,
+  "relevant": true or false
+}
+
+RULES:
+- invoice_number: the invoice series + number, e.g. "26M02607777"; may appear as "Factura nr.", "Nr. factura", or in a header box
+- date: the issue date (data emiterii), format YYYY-MM-DD
+- contract_number: may appear as "Nr. contract", "Numar contract", "Contract nr."
+- livrare: the delivery or service period string as it appears on the invoice (e.g. "01.08.2024 - 31.08.2024"); may also appear as "Perioada de facturare" or "Interval"
+- total_plata: the final total amount due (Total de plata / Total plata), as a plain number — no currency symbols, currency is always RON
+- relevant: set to true only if the vendor name contains "PPC Energie"; set to false for any other vendor
+- If a field is not visible or not applicable, use null"""
 
 
 
@@ -189,11 +213,11 @@ def encode_pil_image(pil_img) -> tuple[str, str]:
     return base64.standard_b64encode(buf.tobytes()).decode("utf-8"), "image/jpeg"
 
 
-def _call_api(client: anthropic.Anthropic, ocr_text: str) -> dict:
+def _call_api(client: anthropic.Anthropic, ocr_text: str, system_prompt: str) -> dict:
     response = client.messages.create(
         model="claude-haiku-4-5-20251001",
         max_tokens=4096,
-        system=SYSTEM_PROMPT,
+        system=system_prompt,
         messages=[
             {
                 "role": "user",
@@ -211,12 +235,22 @@ def _call_api(client: anthropic.Anthropic, ocr_text: str) -> dict:
 
 def extract_receipt(client: anthropic.Anthropic, image_path: Path) -> dict:
     ocr_text = ocr_with_vision(image_path)
-    return _call_api(client, ocr_text)
+    return _call_api(client, ocr_text, RECEIPT_SYSTEM_PROMPT)
 
 
 def extract_receipt_from_pil(client: anthropic.Anthropic, pil_img) -> dict:
     ocr_text = ocr_pil_with_vision(pil_img)
-    return _call_api(client, ocr_text)
+    return _call_api(client, ocr_text, RECEIPT_SYSTEM_PROMPT)
+
+
+def extract_factura(client: anthropic.Anthropic, image_path: Path) -> dict:
+    ocr_text = ocr_with_vision(image_path)
+    return _call_api(client, ocr_text, FACTURA_SYSTEM_PROMPT)
+
+
+def extract_factura_from_pil(client: anthropic.Anthropic, pil_img) -> dict:
+    ocr_text = ocr_pil_with_vision(pil_img)
+    return _call_api(client, ocr_text, FACTURA_SYSTEM_PROMPT)
 
 
 def style_header(cell, header_fill, header_font, center, border):
@@ -376,6 +410,94 @@ def build_excel(records: list[dict], output_path: str):
     print(f"   {len(records)} receipts")
 
 
+def build_excel_facturi(records: list[dict], output_path: str):
+    wb = openpyxl.Workbook()
+
+    header_fill = PatternFill("solid", start_color="2F5496")
+    header_font = Font(bold=True, color="FFFFFF", name="Arial", size=10)
+    cell_font   = Font(name="Arial", size=10)
+    bold_font   = Font(bold=True, name="Arial", size=10)
+    alt_fill    = PatternFill("solid", start_color="DCE6F1")
+    border      = Border(
+        bottom=Side(style="thin", color="BFBFBF"),
+        right=Side(style="thin", color="BFBFBF"),
+    )
+    center = Alignment(horizontal="center", vertical="center")
+    money  = '#,##0.00'
+
+    ws = wb.active
+    ws.title = "Facturi"
+    ws.freeze_panes = "A2"
+    ws.row_dimensions[1].height = 20
+
+    headers = [
+        "File",
+        "Factura Nr",
+        "Data Emiterii",
+        "Furnizor",
+        "Client",
+        "Numar Contract",
+        "Livrare",
+        "Total Plata",
+        "Parse Error",
+    ]
+
+    for col, h in enumerate(headers, 1):
+        style_header(ws.cell(row=1, column=col, value=h), header_fill, header_font, center, border)
+
+    set_col_widths(ws, [22, 18, 14, 28, 28, 18, 28, 16, 24])
+    ws.auto_filter.ref = f"A1:{openpyxl.utils.get_column_letter(len(headers))}1"
+
+    money_col = 8  # Total Plata
+
+    for row_idx, rec in enumerate(records, 2):
+        d  = rec.get("data", {})
+        v  = d.get("vendor", {}) or {}
+        cl = d.get("client", {}) or {}
+        err = rec.get("error", "")
+        fill = alt_fill if row_idx % 2 == 0 else None
+
+        raw_date = d.get("date")
+        if raw_date:
+            try:
+                from datetime import datetime
+                raw_date = datetime.strptime(raw_date, "%Y-%m-%d").strftime("%d/%m/%Y")
+            except Exception:
+                pass
+
+        row_values = [
+            rec.get("filename"),
+            d.get("invoice_number"),
+            raw_date,
+            v.get("name"),
+            cl.get("name"),
+            d.get("contract_number"),
+            d.get("livrare"),
+            d.get("total_plata"),
+            err,
+        ]
+
+        for col, val in enumerate(row_values, 1):
+            cell = ws.cell(row=row_idx, column=col, value=val)
+            cell.font = cell_font
+            cell.border = border
+            if fill:
+                cell.fill = fill
+            if col == money_col and isinstance(val, (int, float)):
+                cell.number_format = money
+
+    total_row = len(records) + 2
+    ws.cell(row=total_row, column=7, value="TOTAL").font = bold_font
+    total_cell = ws.cell(row=total_row, column=money_col,
+                         value=f"=SUM(H2:H{total_row-1})")
+    total_cell.font = bold_font
+    total_cell.number_format = money
+
+    wb.save(output_path)
+    print(f"\n✅ Saved → {output_path}")
+    print(f"   {len(records)} facturi")
+
+
 def iter_inputs(input_path: Path):
     """Yield (label, extractor_fn) for each receipt to process.
 
@@ -408,11 +530,17 @@ def iter_inputs(input_path: Path):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Romanian fiscal receipt extractor via Claude Vision")
-    parser.add_argument("--folder", required=True, help="Folder with receipt images, or a PDF file")
-    parser.add_argument("--output", default="receipts.xlsx", help="Output Excel filename")
+    parser = argparse.ArgumentParser(description="Romanian fiscal document extractor via Claude Vision")
+    parser.add_argument("--input", required=True, help="Folder with images, or a PDF file")
+    parser.add_argument("--output", default="output files/output.xlsx", help="Output Excel filename")
+    parser.add_argument("--mode", choices=["receipts", "facturi"], default="receipts",
+                        help="Document type to process (default: receipts)")
     parser.add_argument("--skip-errors", action="store_true", help="Continue on parse failures")
     args = parser.parse_args()
+
+    output = args.output
+    if not os.path.dirname(output):
+        output = os.path.join("output files", output)
 
     api_key = os.environ.get("ANTHROPIC_API_KEY")
     if not api_key:
@@ -422,7 +550,9 @@ def main():
 
     client = anthropic.Anthropic(api_key=api_key)
 
-    input_path = Path(args.folder)
+    is_facturi = args.mode == "facturi"
+
+    input_path = Path(args.input)
     inputs = list(iter_inputs(input_path))
 
     if not inputs:
@@ -434,19 +564,26 @@ def main():
     for i, (label, img_path, pil_img) in enumerate(inputs, 1):
         print(f"[{i}/{total}] {label} ... ", end="", flush=True)
         try:
-            if pil_img is not None:
-                data = extract_receipt_from_pil(client, pil_img)
+            if is_facturi:
+                data = extract_factura_from_pil(client, pil_img) if pil_img is not None else extract_factura(client, img_path)
+                if not data.get("relevant", True):
+                    vendor = (data.get("vendor") or {}).get("name", "?")
+                    print(f"–  skipped ({vendor})")
+                    continue
+                records.append({"filename": label, "data": data, "error": ""})
+                vendor = (data.get("vendor") or {}).get("name", "?")
+                total_amount = data.get("total_plata", "?")
+                print(f"✓  {vendor}  {total_amount} RON")
             else:
-                data = extract_receipt(client, img_path)
-            data["vat_breakdown"] = normalize_vat_by_rate(data.get("vat_breakdown", {}))
-            warnings = validate_receipt(data)
-            for w in warnings:
-                print(f"\n  ⚠  {w}", end="")
-            records.append({"filename": label, "data": data,
-                            "error": "; ".join(warnings)})
-            vendor = (data.get("vendor") or {}).get("name", "?")
-            total_amount = data.get("total_with_vat", "?")
-            print(f"✓  {vendor}  {total_amount} RON")
+                data = extract_receipt_from_pil(client, pil_img) if pil_img is not None else extract_receipt(client, img_path)
+                data["vat_breakdown"] = normalize_vat_by_rate(data.get("vat_breakdown", {}))
+                warnings = validate_receipt(data)
+                for w in warnings:
+                    print(f"\n  ⚠  {w}", end="")
+                records.append({"filename": label, "data": data, "error": "; ".join(warnings)})
+                vendor = (data.get("vendor") or {}).get("name", "?")
+                total_amount = data.get("total_with_vat", "?")
+                print(f"✓  {vendor}  {total_amount} RON")
         except Exception as e:
             print(f"✗  ERROR: {e}")
             records.append({"filename": label, "data": {}, "error": str(e)})
@@ -455,7 +592,10 @@ def main():
                 break
 
     if records:
-        build_excel(records, args.output)
+        if is_facturi:
+            build_excel_facturi(records, output)
+        else:
+            build_excel(records, output)
 
 
 if __name__ == "__main__":
