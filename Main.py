@@ -99,7 +99,7 @@ RULES:
 - invoice_number: the invoice series + number, e.g. "26M02607777"; may appear as "Factura nr.", "Nr. factura", or in a header box
 - date: the issue date (data emiterii), format YYYY-MM-DD
 - contract_number: may appear as "Nr. contract", "Numar contract", "Contract nr."
-- livrare: the delivery or service period string as it appears on the invoice (e.g. "01.08.2024 - 31.08.2024"); may also appear as "Perioada de facturare" or "Interval"
+- livrare: the delivery address located right after contract number found as "Livrare"
 - total_plata: the final total amount due (Total de plata / Total plata), as a plain number — no currency symbols, currency is always RON
 - relevant: set to true only if the vendor name contains "PPC Energie"; set to false for any other vendor
 - If a field is not visible or not applicable, use null"""

@@ -1,0 +1,8 @@
+anthropic
+google-cloud-vision
+openpyxl
+pillow
+opencv-python
+numpy
+pdf2image
+python-dotenv
